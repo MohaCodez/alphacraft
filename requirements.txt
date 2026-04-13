@@ -1,0 +1,12 @@
+yfinance
+pandas
+numpy
+scipy
+requests
+fredapi
+streamlit
+plotly
+sqlalchemy
+apscheduler
+joblib
+python-dotenv
