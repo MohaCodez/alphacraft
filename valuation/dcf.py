@@ -58,7 +58,7 @@ def run_dcf(fcf, growth_rate, wacc, shares_outstanding=1, net_debt=0,
     projection_years = projection_years or DCF_PROJECTION_YEARS
     tv_haircut = tv_haircut if tv_haircut is not None else (DCF_TV_HAIRCUT_MIN + DCF_TV_HAIRCUT_MAX) / 2
 
-    if terminal_growth >= wacc:
+    if terminal_growth >= wacc - 0.02:
         terminal_growth = wacc - 0.02
 
     # Reinvestment constraint on initial growth

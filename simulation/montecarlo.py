@@ -119,12 +119,13 @@ def run_combined_simulation(base_fcf, growth_rate, wacc, net_debt, shares,
                                        MC_GROWTH_MIN, MC_GROWTH_MAX,
                                        MC_GROWTH_SKEW_ALPHA)
     wacc_draws = _lognormal_draws(z2, wacc, MC_WACC_SIGMA)
+    wacc_draws = np.maximum(wacc_draws, 0.04)  # WACC floor
 
     per_sim_g_spread = np.abs(g_draws - g_base)
     tv_haircut = np.clip(0.9 - 2.0 * per_sim_g_spread, DCF_TV_HAIRCUT_MIN, DCF_TV_HAIRCUT_MAX)
 
-    # Filter valid sims
-    valid = terminal_growth < wacc_draws
+    # Filter valid sims: g_inf must be < WACC - 0.02
+    valid = (terminal_growth + 0.02) < wacc_draws
     g_draws, wacc_draws, tv_haircut = g_draws[valid], wacc_draws[valid], tv_haircut[valid]
     m = len(g_draws)
     if m < 100:
@@ -168,6 +169,9 @@ def run_combined_simulation(base_fcf, growth_rate, wacc, net_debt, shares,
     for i, a in enumerate(arrays):
         if a is not None and weights[i] > 0:
             combined += a * weights[i]
+
+    # Validate weights sum to 1
+    assert abs(sum(weights) - 1.0) < 1e-6 or all(w == 0 for w in weights)
 
     # Capital efficiency
     alpha = capital_efficiency_multiplier(roic, wacc)

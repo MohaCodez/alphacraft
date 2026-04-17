@@ -20,24 +20,33 @@ def compute_cost_of_equity(beta, risk_free_rate, equity_risk_premium=None):
 
 
 def compute_roic(fundamentals):
-    op_income = fundamentals.get("operating_cash_flow")
     tax_rate = 0.21
-    if not op_income or op_income <= 0:
-        return None
-    nopat = op_income * (1 - tax_rate)
+    # Prefer EBIT for NOPAT
+    ebit = fundamentals.get("ebit")
+    if ebit and ebit > 0:
+        nopat = ebit * (1 - tax_rate)
+    else:
+        # Fallback: OpCF × (1-T), flagged
+        op_income = fundamentals.get("operating_cash_flow")
+        if not op_income or op_income <= 0:
+            return None
+        nopat = op_income * (1 - tax_rate)
 
     total_debt = fundamentals.get("net_debt", 0) or 0
-    market_cap = fundamentals.get("market_cap")
-    if not market_cap:
-        return None
-
-    bvps = fundamentals.get("pb")
-    shares = fundamentals.get("shares_outstanding")
-    if bvps and shares and bvps > 0:
-        equity_book = market_cap / bvps
-        invested = equity_book + max(total_debt, 0)
+    total_equity = fundamentals.get("total_equity")
+    if total_equity and total_equity > 0:
+        invested = total_equity + max(total_debt, 0)
     else:
-        invested = market_cap + max(total_debt, 0)
+        market_cap = fundamentals.get("market_cap")
+        if not market_cap:
+            return None
+        bvps = fundamentals.get("pb")
+        shares = fundamentals.get("shares_outstanding")
+        if bvps and shares and bvps > 0:
+            equity_book = market_cap / bvps
+            invested = equity_book + max(total_debt, 0)
+        else:
+            invested = market_cap + max(total_debt, 0)
 
     if invested <= 0:
         return None
@@ -57,25 +66,13 @@ def compute_reinvestment_rate(fundamentals):
 
 
 def compute_accrual_ratio(fundamentals):
-    """Accrual = (Net Income - FCF) / Total Assets. High = accounting noise."""
-    # Proxy: use operating_cash_flow as rough net income proxy, FCF as cash
-    # Better: net_income field, but yfinance doesn't always have it cleanly
-    # Use: accrual ≈ (operating_cf - fcf) / market_cap as a rough proxy
-    op_cf = fundamentals.get("operating_cash_flow")
+    """Accrual = (NetIncome - FCF) / TotalAssets."""
+    net_income = fundamentals.get("net_income")
     fcf = fundamentals.get("fcf")
-    mcap = fundamentals.get("market_cap")
-    if not op_cf or not fcf or not mcap or mcap <= 0:
+    total_assets = fundamentals.get("total_assets")
+    if net_income is None or fcf is None or not total_assets or total_assets <= 0:
         return None
-    # (op_cf - fcf) = capex (already negative in yfinance), so this is |capex|/mcap
-    # More useful: compare earnings quality
-    # net_income proxy = eps_ttm × shares
-    eps = fundamentals.get("eps_ttm")
-    shares = fundamentals.get("shares_outstanding")
-    if eps and shares and shares > 0:
-        net_income = eps * shares
-        accrual = (net_income - fcf) / mcap
-        return accrual
-    return None
+    return (net_income - fcf) / total_assets
 
 
 def compute_piotroski(fundamentals):

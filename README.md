@@ -1,6 +1,6 @@
 # Alphacraft
 
-> A probabilistic stock valuation engine that estimates fair value ranges using DCF, relative valuation, and Monte Carlo simulation — built by a dev who trades.
+> A probabilistic stock valuation engine that estimates fair value distributions using multi-stage DCF, relative valuation, and correlated Monte Carlo simulation.
 
 ---
 
@@ -8,9 +8,9 @@
 
 Alphacraft runs a full valuation pipeline across all S&P 500 stocks and ranks them by how mispriced they appear relative to their estimated fair value.
 
-Instead of producing a single price target, it models uncertainty — giving you a **fair value range** (P10 to P90) and a **mispricing Z-score** that tells you how far the current market price sits from the expected fair value distribution.
+Instead of producing a single price target, it models uncertainty — giving you a **fair value range** (P10 to P90), a **conviction score**, and a **percentile-based mispricing signal** that tells you where the current market price sits within the modeled fair value distribution.
 
-The output is a ranked screener: the most undervalued and most overvalued stocks in the S&P 500, updated daily.
+The output is a ranked screener with sector analysis, scatter plots, and deep-dive ticker lookup — updated daily.
 
 ---
 
@@ -27,76 +27,42 @@ Alphacraft treats valuation as a probability distribution, not a point estimate.
 ## How It Works
 
 ```
-S&P 500 Universe
+S&P 500 Universe (Wikipedia)
       ↓
 Data Ingestion
-  → Price & market data      (yfinance)
-  → Fundamentals             (yfinance)
-  → Macro indicators         (FRED API)
+  → Fundamentals: EPS, FCF, EBITDA, EBIT, balance sheet   (yfinance)
+  → Macro: 10yr yield, CPI, fed funds rate                 (FRED API)
       ↓
 Feature Engineering
-  → WACC computation
-  → FCF growth rate
-  → Sector-relative multiples
-  → Piotroski F-Score
+  → Full WACC (debt + equity)
+  → ROIC (EBIT-based) + reinvestment rate
+  → Smart growth blending (forward EPS implied + trailing)
+  → Sector medians with IQR (P/E, EV/EBITDA, P/B, growth)
+  → Piotroski F-Score (6-point) + accrual quality
       ↓
-Valuation Engine  (three independent models)
-  → DCF Model                (40% weight)
-  → Relative Valuation       (35% weight)
-  → Earnings-based Model     (25% weight)
+Three Valuation Models (independent)
+  → Multi-stage DCF         (exponential decay, ROIC fade, TV haircut)
+  → Relative Valuation      (PEG-adjusted P/E + EV/EBITDA + P/B blend)
+  → Earnings Model          (Gordon Growth justified P/E, blended horizons)
       ↓
-Monte Carlo Simulation
+Combined Monte Carlo Simulation
   → 10,000 simulations per stock
-  → Randomized growth rate, WACC, macro shocks
-  → Output: fair value distribution (P10 / P50 / P90)
+  → All three models run jointly per simulation
+  → Skewed growth draws, lognormal WACC, regime-based correlation
+  → CV-based inverse-variance blending with entropy regularization
+  → Capital efficiency adjustment (ROIC-WACC sigmoid)
+  → Output: fair value distribution (P10 / P25 / P50 / P75 / P90)
       ↓
 Mispricing Detection
-  → Z-score: (Market Price - P50) / σ
-  → Undervalued / Overvalued / Fair signal
-  → Quality filter via Piotroski Score
+  → Percentile-rank signal (distribution-agnostic)
+  → Conviction score (symmetric for under/overvalued)
+  → EV gap, tail asymmetry, downside risk
+  → Quality + accrual filter
       ↓
-Ranked Screener + Dashboard
+Dashboard: Screener, Sector Analysis, Scatter Plots, Ticker Lookup
 ```
 
----
-
-## Valuation Models
-
-### 1. DCF (Discounted Cash Flow)
-Projects free cash flow over 10 years, discounts at WACC, adds terminal value.
-
-```
-Intrinsic Value = Σ [FCF_t / (1 + WACC)^t] + Terminal Value
-Terminal Value  = FCF_n × (1 + g) / (WACC - g)
-WACC            = Risk-Free Rate + β × Equity Risk Premium
-```
-
-### 2. Relative Valuation
-Compares the stock's P/E against its sector median P/E to estimate a sector-justified price.
-
-### 3. Earnings-Based Model
-Uses forward EPS and a growth-justified P/E (Peter Lynch method) to estimate fair value.
-
-```
-Justified P/E  = EPS Growth Rate (%)
-Fair Value     = Forward EPS × Justified P/E
-```
-
-### Monte Carlo Layer
-Each of the 10,000 simulations draws:
-- FCF growth rate from `N(μ, σ=0.08)`
-- WACC from `N(μ, σ=0.015)`
-
-Producing a distribution of fair values, not a single number.
-
-### Mispricing Score
-```
-Z-Score = (Market Price - P50) / σ(fair value distribution)
-
-Z < -1.5  →  UNDERVALUED
--1.5 to +1.5  →  FAIRLY VALUED
-Z > +1.5  →  OVERVALUED
-```
+For the complete mathematical specification, see **[MATH.md](MATH.md)**.
 
 ---
 
@@ -108,28 +74,29 @@ alphacraft/
 │   ├── ingestion/
 │   │   ├── universe.py        # S&P 500 ticker list
 │   │   ├── price.py           # price & market data
-│   │   ├── fundamentals.py    # EPS, FCF, ratios
+│   │   ├── fundamentals.py    # EPS, FCF, EBITDA, EBIT, balance sheet
 │   │   └── macro.py           # treasury yield, CPI
 │   └── store.py               # DB read/write layer
 ├── features/
-│   └── builder.py             # raw → feature transformation
+│   └── builder.py             # WACC, ROIC, growth, Piotroski, accrual
 ├── valuation/
-│   ├── dcf.py
-│   ├── relative.py
-│   ├── earnings.py
-│   └── ensemble.py
+│   ├── dcf.py                 # multi-stage DCF with exponential decay
+│   ├── relative.py            # PEG-adjusted multi-metric relative
+│   ├── earnings.py            # Gordon Growth justified P/E
+│   └── ensemble.py            # CV-based inverse-variance + capital efficiency
 ├── simulation/
-│   └── montecarlo.py
+│   └── montecarlo.py          # combined correlated Monte Carlo
 ├── signals/
-│   └── mispricing.py
+│   └── mispricing.py          # percentile signal, conviction, EV gap
 ├── scheduler/
-│   └── jobs.py
+│   └── jobs.py                # APScheduler daily runs
 ├── dashboard/
-│   └── app.py
+│   └── app.py                 # Streamlit + Plotly dashboard
 ├── db/
 │   └── schema.sql
-├── config.py
-├── main.py
+├── config.py                  # all tunable parameters
+├── main.py                    # pipeline orchestrator
+├── MATH.md                    # complete mathematical specification
 └── requirements.txt
 ```
 
@@ -144,7 +111,7 @@ alphacraft/
 | Storage | SQLite |
 | Dashboard | Streamlit + Plotly |
 | Scheduling | APScheduler |
-| Parallelism | ThreadPoolExecutor, joblib |
+| Parallelism | ThreadPoolExecutor |
 
 ---
 
@@ -168,19 +135,14 @@ Get a free key at [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api
 FRED_API_KEY=your_key_here
 ```
 
-**4. Initialize the database**
+**4. Run the pipeline**
 ```bash
-sqlite3 db/alphacraft.db < db/schema.sql
+python3 main.py
 ```
 
-**5. Run the pipeline**
-```bash
-python main.py
-```
+First run fetches fundamentals for all 500 stocks — expect 15–25 minutes. The database is auto-initialized.
 
-First run fetches fundamentals for all 500 stocks — expect 15–25 minutes depending on your connection. Subsequent daily runs are faster (price-only refresh).
-
-**6. Launch the dashboard**
+**5. Launch the dashboard**
 ```bash
 streamlit run dashboard/app.py
 ```
@@ -189,16 +151,17 @@ streamlit run dashboard/app.py
 
 ## Configuration
 
-All key parameters live in `config.py`:
+All parameters live in `config.py`. Key ones:
 
-```python
-MONTE_CARLO_RUNS = 10000       # simulations per stock
-DCF_WEIGHT = 0.40              # ensemble weights
-RELATIVE_WEIGHT = 0.35
-EARNINGS_WEIGHT = 0.25
-UNDERVALUED_THRESHOLD = -1.5   # Z-score cutoffs
-OVERVALUED_THRESHOLD = 1.5
-```
+| Parameter | Default | Purpose |
+|---|---|---|
+| `MONTE_CARLO_RUNS` | 10,000 | Simulations per stock |
+| `DCF_GROWTH_DECAY_K` | 0.5 | Exponential growth fade speed |
+| `DCF_TV_HAIRCUT range` | [0.60, 0.90] | Terminal value confidence discount |
+| `MC_GROWTH_SKEW_ALPHA` | -2.0 | Left-tail fatness in growth draws |
+| `ENSEMBLE_ENTROPY_GAMMA` | 0.1 | Anti-dominance regularization |
+| `UNDERVALUED_PERCENTILE` | 0.15 | Signal threshold |
+| `OVERVALUED_PERCENTILE` | 0.85 | Signal threshold |
 
 ---
 
@@ -207,29 +170,31 @@ OVERVALUED_THRESHOLD = 1.5
 | Data | Source | Refresh |
 |---|---|---|
 | Price, beta, multiples | yfinance | Daily |
-| FCF, EPS, revenue, debt | yfinance | Quarterly |
+| FCF, EPS, EBITDA, EBIT, balance sheet | yfinance | Quarterly |
 | 10yr treasury yield | FRED API | Weekly |
 | CPI, fed funds rate | FRED API | Weekly |
-| Sector P/E medians | Computed from universe | Weekly |
+| Sector medians (P/E, EV/EBITDA, P/B) | Computed from universe | Per run |
 
 ---
 
 ## Limitations & Honest Caveats
 
-- **DCF is assumption-sensitive.** Small changes in growth rate or WACC swing fair value significantly. The Monte Carlo layer partially addresses this by modeling that uncertainty explicitly.
-- **This is a screening tool, not a prediction system.** A low Z-score means a stock looks cheap relative to its modeled fundamentals — it does not mean the stock will go up.
-- **S&P 500 stocks are heavily analyzed.** Persistent mispricing in large-caps is rare. Signals are more meaningful as relative comparisons than as absolute calls.
-- **yfinance is unofficial.** It works well but occasionally returns missing or stale data. The pipeline handles missing data with fallbacks but results for data-sparse stocks should be treated with more skepticism.
-- **Not financial advice.** This is a quantitative modeling project. Use it to inform your own research, not as a buy/sell signal.
+- **DCF is assumption-sensitive.** The Monte Carlo layer models this uncertainty explicitly, but small structural changes in growth or WACC still swing results.
+- **This is a screening tool, not a prediction system.** A high conviction undervalued signal means a stock looks cheap relative to modeled fundamentals — it does not mean the stock will go up.
+- **Optionality is invisible.** Stocks priced for future business lines (TSLA/robotaxi, biotech pipelines) will always look overvalued to a fundamentals model. The model correctly identifies the gap; interpreting it requires judgment.
+- **S&P 500 stocks are heavily analyzed.** Persistent mispricing in large-caps is rare. Signals are more meaningful as relative comparisons than absolute calls.
+- **yfinance is unofficial.** Occasionally returns missing or stale data. The pipeline handles missing data with fallbacks and model exclusion.
+- **Not financial advice.** This is a quantitative modeling project.
 
 ---
 
 ## Roadmap
 
-- [ ] Backtesting engine — validate historical mispricing signals against forward returns
-- [ ] Regime switching — adjust model weights in bull vs bear environments
-- [ ] Jump diffusion — model earnings shock events
+- [ ] Backtesting engine — validate historical signals against forward returns
+- [ ] Regime switching — adjust model weights and correlation in bull vs bear
+- [ ] Jump diffusion — model earnings shock events in MC
 - [ ] Volatility clustering — time-varying σ in Monte Carlo
+- [ ] Factor decomposition — separate alpha from known risk premia
 - [ ] Portfolio-level extension — multi-stock correlation modeling
 - [ ] Expand universe to Russell 1000
 

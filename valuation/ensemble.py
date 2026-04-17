@@ -59,11 +59,12 @@ def inverse_variance_weights(sigma_dcf, sigma_rel, sigma_earn,
     total = sum(weights)
     weights = [w / total for w in weights] if total > 0 else [0, 0, 0]
 
-    # Apply floor
+    # Apply dynamic floor
+    min_weight = min(floor, 1.0 / n_active) if n_active > 0 else floor
     if n_active > 1:
         for i in range(3):
-            if weights[i] > 0 and weights[i] < floor:
-                weights[i] = floor
+            if weights[i] > 0 and weights[i] < min_weight:
+                weights[i] = min_weight
         total = sum(weights)
         weights = [w / total for w in weights]
 

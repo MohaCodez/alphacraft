@@ -75,7 +75,7 @@ def compute_signal(current_price, simulation_result, piotroski_score, accrual_ra
     tail_asymmetry = upside / downside if downside > 0 else 2.0
 
     # Conviction
-    f_norm = min(piotroski_score, 9) / 9.0 if piotroski_score else 0
+    f_norm = min(piotroski_score, 6) / 6.0 if piotroski_score else 0
     signal_strength = abs(signal_pct - 0.5) * 2
     distribution_tightness = 1 - min(downside_risk, 0.8)
 

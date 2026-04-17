@@ -48,6 +48,8 @@ def process_stock(fundamentals, macro, sector_medians, run_dt):
             return None
 
         net_debt = fundamentals.get("net_debt", 0) or 0
+        total_debt = fundamentals.get("total_debt", 0) or 0
+        total_cash = fundamentals.get("total_cash", 0) or 0
         sector = fundamentals.get("sector")
         sector_stats = sector_medians.get(sector, {})
         price = fundamentals.get("current_price")
@@ -70,29 +72,27 @@ def process_stock(fundamentals, macro, sector_medians, run_dt):
             dcf_val = None
 
         # --- Relative (multi-metric, PEG-adjusted, EV bridge) ---
-        ebitda = None
-        ev_ebitda_stock = fundamentals.get("ev_ebitda")
-        if ev_ebitda_stock and ev_ebitda_stock > 0 and fundamentals.get("market_cap"):
-            ev_approx = fundamentals["market_cap"] + max(net_debt, 0)
-            ebitda = ev_approx / ev_ebitda_stock
+        # Fix 1: Use direct EBITDA, not derived from EV/EBITDA ratio
+        ebitda = fundamentals.get("ebitda")
 
+        # Fix 2: BVPS = TotalEquity / Shares (no Price dependency)
         bvps = None
-        pb = fundamentals.get("pb")
-        if pb and pb > 0 and price:
-            bvps = price / pb
+        total_equity = fundamentals.get("total_equity")
+        if total_equity and total_equity > 0 and shares and shares > 0:
+            bvps = total_equity / shares
 
         rel_val = run_relative(
             fundamentals.get("pe_trailing"), fundamentals.get("eps_ttm"),
             sector_stats.get("pe", 20),
             pe_forward=fundamentals.get("pe_forward"),
             eps_forward=fundamentals.get("eps_forward"),
-            ev_ebitda=ev_ebitda_stock,
+            ev_ebitda=fundamentals.get("ev_ebitda"),
             sector_ev_ebitda=sector_stats.get("ev_ebitda", 12),
             ebitda=ebitda,
-            total_debt=max(net_debt, 0) if net_debt else 0,
-            cash=max(-net_debt, 0) if net_debt and net_debt < 0 else 0,
+            total_debt=total_debt,
+            cash=total_cash,
             shares_outstanding=shares,
-            pb=pb, sector_pb=sector_stats.get("pb", 2.5), bvps=bvps,
+            pb=fundamentals.get("pb"), sector_pb=sector_stats.get("pb", 2.5), bvps=bvps,
             growth_rate=growth,
             sector_growth=sector_stats.get("growth", 0.05),
         )
