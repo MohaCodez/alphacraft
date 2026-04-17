@@ -1,21 +1,20 @@
--- db/schema.sql
-
-CREATE TABLE universe (
+CREATE TABLE IF NOT EXISTS universe (
     ticker TEXT PRIMARY KEY,
     sector TEXT,
     added_at TIMESTAMP
 );
 
-CREATE TABLE raw_prices (
+CREATE TABLE IF NOT EXISTS raw_prices (
     ticker TEXT,
     date DATE,
     close REAL,
     volume INTEGER,
     beta REAL,
-    fetched_at TIMESTAMP
+    fetched_at TIMESTAMP,
+    PRIMARY KEY (ticker, date)
 );
 
-CREATE TABLE raw_fundamentals (
+CREATE TABLE IF NOT EXISTS raw_fundamentals (
     ticker TEXT PRIMARY KEY,
     eps_ttm REAL,
     eps_forward REAL,
@@ -35,7 +34,7 @@ CREATE TABLE raw_fundamentals (
     fetched_at TIMESTAMP
 );
 
-CREATE TABLE raw_macro (
+CREATE TABLE IF NOT EXISTS raw_macro (
     date DATE PRIMARY KEY,
     treasury_10yr REAL,
     cpi REAL,
@@ -43,7 +42,7 @@ CREATE TABLE raw_macro (
     fetched_at TIMESTAMP
 );
 
-CREATE TABLE features (
+CREATE TABLE IF NOT EXISTS features (
     ticker TEXT PRIMARY KEY,
     fcf_growth_rate REAL,
     revenue_growth REAL,
@@ -54,7 +53,7 @@ CREATE TABLE features (
     computed_at TIMESTAMP
 );
 
-CREATE TABLE valuations (
+CREATE TABLE IF NOT EXISTS valuations (
     ticker TEXT,
     run_date DATE,
     dcf_value REAL,
@@ -68,7 +67,7 @@ CREATE TABLE valuations (
     PRIMARY KEY (ticker, run_date)
 );
 
-CREATE TABLE signals (
+CREATE TABLE IF NOT EXISTS signals (
     ticker TEXT,
     run_date DATE,
     current_price REAL,

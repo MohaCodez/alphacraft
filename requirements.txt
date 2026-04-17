@@ -3,10 +3,10 @@ pandas
 numpy
 scipy
 requests
+lxml
 fredapi
 streamlit
 plotly
-sqlalchemy
 apscheduler
 joblib
 python-dotenv
