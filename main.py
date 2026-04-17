@@ -2,16 +2,18 @@ import sys
 from data.ingestion.universe import get_sp500_tickers
 from data.ingestion.fundamentals import fetch_fundamentals
 from data.ingestion.macro import fetch_macro
-from data.store import init_db, save_universe, save_fundamentals, save_macro, save_features, save_valuation, save_signal
+from data.store import (init_db, save_universe, save_fundamentals, save_macro,
+                        save_features, save_valuation, save_signal)
 from features.builder import build_features, compute_sector_medians
 from valuation.dcf import run_dcf
 from valuation.relative import run_relative
 from valuation.earnings import run_earnings
-from valuation.ensemble import ensemble
+from valuation.ensemble import ensemble, capital_efficiency_multiplier
 from simulation.montecarlo import run_simulation, run_ensemble_simulation
 from signals.mispricing import compute_signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+
 
 def fetch_all_fundamentals(tickers, workers=20):
     results = []
@@ -31,6 +33,7 @@ def fetch_all_fundamentals(tickers, workers=20):
     print()
     return results
 
+
 def process_stock(fundamentals, macro, sector_medians, run_dt):
     ticker = fundamentals["ticker"]
     try:
@@ -43,38 +46,105 @@ def process_stock(fundamentals, macro, sector_medians, run_dt):
             shares = fundamentals["market_cap"] / fundamentals["current_price"]
         if not shares:
             return None
+
         net_debt = fundamentals.get("net_debt", 0) or 0
         sector = fundamentals.get("sector")
-        sector_pe = sector_medians.get(sector, {}).get("pe", 20)
-
-        dcf_val = run_dcf(fcf, features["fcf_growth_rate"], features["wacc"],
-                          shares_outstanding=shares, net_debt=net_debt)
-        rel_val = run_relative(fundamentals.get("pe_trailing"), fundamentals.get("eps_ttm"),
-                               sector_pe, fundamentals.get("pe_forward"), fundamentals.get("eps_forward"))
-        earn_val = run_earnings(fundamentals.get("eps_forward"), features["revenue_growth"],
-                                macro.get("treasury_10yr", 0.045))
-        # Sanity: discard DCF if negative or <10% of current price
+        sector_stats = sector_medians.get(sector, {})
         price = fundamentals.get("current_price")
+        roic = features.get("roic")
+        rr = features.get("reinvestment_rate")
+        wacc = features["wacc"]
+        cost_of_equity = features["cost_of_equity"]
+        growth = features["fcf_growth_rate"]
+        long_term_growth = features.get("long_term_growth")
+        accrual_ratio = features.get("accrual_ratio")
+
+        # --- DCF (exponential decay, ROIC fade) ---
+        dcf_result = run_dcf(fcf, growth, wacc,
+                             shares_outstanding=shares, net_debt=net_debt,
+                             roic=roic, reinvestment_rate=rr)
+        dcf_val = dcf_result["value"] if dcf_result else None
+        tv_contribution = dcf_result["tv_contribution"] if dcf_result else None
+
         if dcf_val and price and dcf_val < price * 0.10:
             dcf_val = None
 
+        # --- Relative (multi-metric, PEG-adjusted, EV bridge) ---
+        ebitda = None
+        ev_ebitda_stock = fundamentals.get("ev_ebitda")
+        if ev_ebitda_stock and ev_ebitda_stock > 0 and fundamentals.get("market_cap"):
+            ev_approx = fundamentals["market_cap"] + max(net_debt, 0)
+            ebitda = ev_approx / ev_ebitda_stock
+
+        bvps = None
+        pb = fundamentals.get("pb")
+        if pb and pb > 0 and price:
+            bvps = price / pb
+
+        rel_val = run_relative(
+            fundamentals.get("pe_trailing"), fundamentals.get("eps_ttm"),
+            sector_stats.get("pe", 20),
+            pe_forward=fundamentals.get("pe_forward"),
+            eps_forward=fundamentals.get("eps_forward"),
+            ev_ebitda=ev_ebitda_stock,
+            sector_ev_ebitda=sector_stats.get("ev_ebitda", 12),
+            ebitda=ebitda,
+            total_debt=max(net_debt, 0) if net_debt else 0,
+            cash=max(-net_debt, 0) if net_debt and net_debt < 0 else 0,
+            shares_outstanding=shares,
+            pb=pb, sector_pb=sector_stats.get("pb", 2.5), bvps=bvps,
+            growth_rate=growth,
+            sector_growth=sector_stats.get("growth", 0.05),
+        )
+
+        # --- Earnings (Gordon Growth, blended horizons) ---
+        earn_val = run_earnings(fundamentals.get("eps_forward"), growth,
+                                cost_of_equity, long_term_growth=long_term_growth)
+
+        # --- Deterministic ensemble ---
         ens_val = ensemble(dcf_val, rel_val, earn_val)
 
-        # Primary: FCF-based MC. Fallback: ensemble-based MC.
-        sim = run_simulation(fcf, features["fcf_growth_rate"], features["wacc"],
-                             net_debt=net_debt, shares=shares)
-        # If FCF MC gives unreasonable result, fall back to ensemble MC
+        # --- Capital efficiency ---
+        alpha = capital_efficiency_multiplier(roic, wacc)
+
+        # --- Monte Carlo (combined: DCF + relative + earnings jointly) ---
+        sim = run_simulation(fcf, growth, wacc,
+                             net_debt=net_debt, shares=shares,
+                             roic=roic, reinvestment_rate=rr,
+                             sector=sector,
+                             rel_val=rel_val, earn_val=earn_val)
+
         if sim and price and sim["p50"] < price * 0.10:
             sim = None
+
         if not sim:
-            sim = run_ensemble_simulation(dcf_val, rel_val, earn_val)
+            sim = run_ensemble_simulation(dcf_val, rel_val, earn_val,
+                                          roic=roic, wacc=wacc)
 
-        save_valuation({"ticker": ticker, "run_date": run_dt, "dcf": dcf_val,
-                        "relative": rel_val, "earnings": earn_val, "ensemble": ens_val,
-                        "p10": sim["p10"] if sim else None, "p50": sim["p50"] if sim else None,
-                        "p90": sim["p90"] if sim else None, "std": sim["std"] if sim else None})
+        # Extract weights if available
+        mc_weights = sim.get("weights", [None, None, None]) if sim else [None, None, None]
 
-        signal = compute_signal(fundamentals.get("current_price"), sim, features["piotroski_score"])
+        save_valuation({
+            "ticker": ticker, "run_date": run_dt,
+            "dcf": dcf_val, "relative": rel_val, "earnings": earn_val,
+            "ensemble": ens_val,
+            "p10": sim["p10"] if sim else None,
+            "p25": sim.get("p25") if sim else None,
+            "p50": sim["p50"] if sim else None,
+            "p75": sim.get("p75") if sim else None,
+            "p90": sim["p90"] if sim else None,
+            "std": sim["std"] if sim else None,
+            "skew": sim.get("skew") if sim else None,
+            "tv_contribution": tv_contribution,
+            "dcf_weight": mc_weights[0],
+            "rel_weight": mc_weights[1],
+            "earn_weight": mc_weights[2],
+            "capital_efficiency_alpha": alpha,
+        })
+
+        # --- Signal (with accrual penalty) ---
+        signal = compute_signal(price, sim, features["piotroski_score"],
+                                accrual_ratio=accrual_ratio)
         if signal:
             signal["ticker"] = ticker
             signal["run_date"] = run_dt
@@ -84,19 +154,14 @@ def process_stock(fundamentals, macro, sector_medians, run_dt):
         print(f"\n  {ticker} processing error: {e}")
     return None
 
-def run_pipeline(progress_callback=None):
-    """Run the full valuation pipeline.
 
-    Args:
-        progress_callback: Optional callable(step, total_steps, message, pct)
-            where pct is 0.0-1.0 overall progress. Used by the dashboard for live updates.
-    """
+def run_pipeline(progress_callback=None):
     def _report(step, total, msg, pct):
         print(msg)
         if progress_callback:
             progress_callback(step, total, msg, pct)
 
-    _report(1, 5, "=== Alphacraft Pipeline ===", 0.0)
+    _report(1, 5, "=== Alphacraft v3 Pipeline ===", 0.0)
     init_db()
 
     _report(1, 5, "[1/5] Fetching S&P 500 universe...", 0.02)
@@ -120,7 +185,7 @@ def run_pipeline(progress_callback=None):
     _report(4, 5, "[4/5] Computing sector medians...", 0.51)
     sector_medians = compute_sector_medians(all_fundamentals)
     for s, v in sorted(sector_medians.items()):
-        print(f"  {s}: median P/E = {v['pe']:.1f}")
+        print(f"  {s}: P/E={v['pe']:.1f}(±{v['pe_iqr']:.1f})  EV/EBITDA={v['ev_ebitda']:.1f}  P/B={v['pb']:.1f}  g={v['growth']:.1%}")
     _report(4, 5, "  Sector medians computed", 0.55)
 
     _report(5, 5, "[5/5] Running valuation + Monte Carlo + signals...", 0.56)
@@ -142,10 +207,13 @@ def run_pipeline(progress_callback=None):
     over = [s for s in signals if s["signal"] == "OVERVALUED"]
     _report(5, 5, f"Done — {len(signals)} signals | {len(under)} undervalued | {len(over)} overvalued", 1.0)
     if under:
-        top = sorted(under, key=lambda x: x["mispricing_zscore"])[:5]
-        print("\n  Top undervalued:")
+        top = sorted(under, key=lambda x: x["conviction"], reverse=True)[:5]
+        print("\n  Top undervalued (by conviction):")
         for s in top:
-            print(f"    {s['ticker']:6s} Z={s['mispricing_zscore']:+.2f}  price=${s['current_price']:.0f}  fair=${s['fair_value_p50']:.0f}")
+            print(f"    {s['ticker']:6s} conv={s['conviction']:.3f}  Z={s['mispricing_zscore']:+.2f}"
+                  f"  price=${s['current_price']:.0f}  fair=${s['fair_value_p50']:.0f}"
+                  f"  DR={s['downside_risk']:.2f}  TA={s.get('tail_asymmetry', 0):.2f}")
+
 
 if __name__ == "__main__":
     run_pipeline()
