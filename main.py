@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 
-def fetch_all_fundamentals(tickers, workers=20):
+def fetch_all_fundamentals(tickers, workers=5):
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(fetch_fundamentals, t): t for t in tickers}

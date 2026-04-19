@@ -42,26 +42,68 @@ div[data-testid="stTextInput"] input { background: #0f1729 !important; border: 1
 # ── Sidebar ──
 with st.sidebar:
     st.markdown("### ⚙️ Pipeline")
+
+    with st.expander("🎛️ Parameters", expanded=False):
+        import config as cfg
+        cfg.MONTE_CARLO_RUNS = st.slider("MC Simulations", 1000, 50000, cfg.MONTE_CARLO_RUNS, step=1000)
+        cfg.MC_GROWTH_SIGMA = st.slider("Growth σ", 0.02, 0.20, cfg.MC_GROWTH_SIGMA, step=0.01)
+        cfg.MC_WACC_SIGMA = st.slider("WACC σ", 0.02, 0.30, cfg.MC_WACC_SIGMA, step=0.01)
+        tv_range = st.slider("TV Haircut", 0.40, 1.0, (cfg.DCF_TV_HAIRCUT_MIN, cfg.DCF_TV_HAIRCUT_MAX), step=0.05)
+        cfg.DCF_TV_HAIRCUT_MIN, cfg.DCF_TV_HAIRCUT_MAX = tv_range
+        cfg.UNDERVALUED_PERCENTILE = st.slider("Undervalued Pctl", 0.05, 0.40, cfg.UNDERVALUED_PERCENTILE, step=0.05)
+        cfg.OVERVALUED_PERCENTILE = st.slider("Overvalued Pctl", 0.60, 0.95, cfg.OVERVALUED_PERCENTILE, step=0.05)
+        st.caption("Applied on next pipeline run")
+
     if "pipeline_running" not in st.session_state:
         st.session_state.pipeline_running = False
     if st.button("🚀 Run Pipeline", disabled=st.session_state.pipeline_running, use_container_width=True):
         st.session_state.pipeline_running = True
+        import time as _time
+        stage_times = {}
+        stage_start = [_time.time()]
+        stage_names = {1: "Universe", 2: "Macro", 3: "Fundamentals", 4: "Sector Medians", 5: "Valuation + MC"}
+        prev_step = [0]
         bar = st.progress(0, text="Starting...")
-        logs = []
+        status_area = st.empty()
         log_area = st.empty()
+        logs = []
+        skipped = []
+        processed_count = [0]
+        signal_count = [0]
+
         try:
             def _cb(step, total, msg, pct):
+                now = _time.time()
+                if step != prev_step[0]:
+                    if prev_step[0] > 0:
+                        stage_times[prev_step[0]] = now - stage_start[0]
+                    stage_start[0] = now
+                    prev_step[0] = step
+                elapsed = now - stage_start[0]
+                label = stage_names.get(step, f"Step {step}")
+                bar.progress(min(pct, 1.0), text=f"**{label}** ({step}/{total}) — {elapsed:.0f}s")
                 logs.append(msg)
-                bar.progress(min(pct, 1.0), text=f"{step}/{total}: {msg}")
-                log_area.code("\n".join(logs[-6:]), language=None)
+                log_area.code("\n".join(logs[-8:]), language=None)
+
             run_pipeline(progress_callback=_cb)
+            # Record last stage
+            if prev_step[0] > 0:
+                stage_times[prev_step[0]] = _time.time() - stage_start[0]
+
             bar.progress(1.0, text="✅ Done")
+
+            # Stage summary
+            summary_lines = []
+            for s in sorted(stage_times):
+                summary_lines.append(f"**{stage_names.get(s, f'Step {s}')}**: {stage_times[s]:.1f}s")
+            status_area.success(" · ".join(summary_lines))
+
         except Exception as e:
             bar.progress(1.0, text="❌ Failed")
             st.error(str(e))
         finally:
             st.session_state.pipeline_running = False
-            import time; time.sleep(1)
+            _time.sleep(1)
             st.rerun()
 
 # ── Load data ──
@@ -110,6 +152,23 @@ with col_t:
 with col_d:
     st.markdown(f"<div style='text-align:right;padding-top:1rem;opacity:0.4;font-size:0.8rem;'>Run: {run_date}</div>", unsafe_allow_html=True)
 
+with st.expander("ℹ️ How to read this dashboard", expanded=False):
+    st.markdown("""
+Alphacraft estimates a **fair value distribution** for each S&P 500 stock using three independent models (DCF, Relative, Earnings) blended through 10,000 Monte Carlo simulations.
+
+**Key columns explained:**
+- **Signal** — UNDERVALUED (price below P15 of distribution), OVERVALUED (above P85), or FAIR
+- **Margin %** — how far price is from the median fair value (positive = cheap)
+- **Conviction** — confidence in the signal (0–1), combining distribution tightness, Piotroski quality, and accrual quality
+- **Z-Score** — standard deviations from median fair value (negative = cheap)
+- **Pctl** — where market price sits in the simulated distribution (0.05 = very cheap, 0.95 = very expensive)
+- **DR (Downside Risk)** — width of the left tail; high DR = fragile valuation, low confidence
+- **EV Gap %** — expected value gap between mean fair value and price
+- **Tail Asym** — upside/downside skew ratio; >1 = more upside potential, <1 = value trap risk
+
+⚠️ *This is a screening tool, not a prediction system. High conviction ≠ the stock will move. Stocks priced for optionality (TSLA, biotech) will always look overvalued to a fundamentals model.*
+""")
+
 n_under = len(df[df["signal"] == "UNDERVALUED"])
 n_over = len(df[df["signal"] == "OVERVALUED"])
 n_fair = len(df[df["signal"] == "FAIR"])
@@ -129,6 +188,7 @@ tab_screener, tab_sectors, tab_scatter, tab_lookup = st.tabs(["📊 Screener", "
 
 # ── Screener Tab ──
 with tab_screener:
+    st.caption("Ranked list of S&P 500 stocks by mispricing signal. Filter by signal type, sector, or quality score. Sort by any metric.")
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
         sig_filter = st.multiselect("Signal", ["UNDERVALUED", "FAIR", "OVERVALUED"],
@@ -187,6 +247,7 @@ with tab_screener:
 
 # ── Sectors Tab ──
 with tab_sectors:
+    st.caption("Signal distribution by sector. Sectors with more green bars have more stocks trading below modeled fair value.")
     sector_agg = df.groupby("sector").agg(
         count=("ticker", "size"),
         undervalued=("signal", lambda x: (x == "UNDERVALUED").sum()),
@@ -220,6 +281,7 @@ with tab_sectors:
 
 # ── Analysis Tab ──
 with tab_scatter:
+    st.caption("Visual analysis. Price vs Fair Value shows where stocks sit relative to the 45° line. Z-Score distribution shows the overall market skew. Conviction vs EV Gap highlights the strongest opportunities.")
     sc1, sc2 = st.columns(2)
 
     with sc1:
@@ -283,6 +345,7 @@ with tab_scatter:
 
 # ── Lookup Tab ──
 with tab_lookup:
+    st.caption("Deep-dive into any stock. See the full valuation breakdown, fair value range, model contributions, and quality metrics.")
     query = st.text_input("Enter ticker", placeholder="AAPL, NVDA, TSLA...", label_visibility="collapsed")
     if query:
         match = df[df["ticker"].str.upper() == query.strip().upper()]
